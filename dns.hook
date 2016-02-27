@@ -1,0 +1,164 @@
+#!/usr/bin/python3
+
+# Copyright 2016 Yin Guanhao <yinguanhao@gmail.com>
+
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+# Usage:
+#
+# Modify EMAIL and KEY.
+#
+# Invoke with `./dns.hook test yourdomain.tld` to test.
+#
+# Then copy/move to hooks dir of acmetool (e.g., /usr/lib/acme/hooks).
+
+import requests
+import signal
+import subprocess
+import sys
+import time
+
+# EMAIL = Cloudflare account email
+# KEY = Cloudflare API key
+
+TIMEOUT = 60
+
+# HTTP request headers for cloudflare API.
+headers = {
+    'X-Auth-Email': EMAIL,
+    'X-Auth-Key': KEY,
+    'Content-Type': 'application/json'
+}
+
+# Cloudflare API base path.
+api = 'https://api.cloudflare.com/client/v4'
+
+# Get zone id and name servers of a domain.
+# XXX: Could fail if you have a lot of zones?
+def get_zone(domain):
+    r = requests.get(api + '/zones', headers=headers)
+    r.raise_for_status()
+    for rr in r.json()['result']:
+        if domain == rr['name'] or domain.endswith('.' + rr['name']):
+            return {'id': rr['id'], 'name_servers': rr['name_servers']}
+    raise Exception('no matching zone')
+
+# API path for add/list/remove dns records
+def api_records(zone):
+    return api + '/zones/' + zone['id'] + '/dns_records'
+
+# Construct DNS challenge record.
+def challenge_record(domain, token):
+    return {
+        'type': 'TXT',
+        'name': '_acme-challenge.' + domain,
+        'content': token
+    }
+
+# Create record.
+def add_challenge(zone, domain, token):
+    r = requests.post(api_records(zone), headers=headers,
+        json=challenge_record(domain, token))
+    r.raise_for_status()
+
+# Delete record.
+def del_challenge(zone, domain, token):
+    params = challenge_record(domain, token)
+    # Cannot filter by content, get 500 internal server error
+    del params['content']
+    r = requests.get(api_records(zone), headers=headers, params=params)
+    r.raise_for_status()
+    for rr in r.json()['result']:
+        if rr['content'] == token:
+            r1 = requests.delete(api_records(zone) + '/' + rr['id'], headers=headers)
+            r1.raise_for_status()
+
+# Timeout using SIGALARM.
+# https://stackoverflow.com/a/22348885
+class timeout:
+    def __init__(self, seconds=1, error_message='Timeout'):
+        self.seconds = seconds
+        self.error_message = error_message
+    def handle_timeout(self, signum, frame):
+        raise TimeoutError(self.error_message)
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self.handle_timeout)
+        signal.alarm(self.seconds)
+    def __exit__(self, type, value, traceback):
+        signal.alarm(0)
+
+def wait_for_challenge_at(ns, vdomain, token, verbose=False):
+    cmd = 'dig +short @{} txt {}'.format(ns, vdomain)
+    while True:
+        time.sleep(1)
+        if verbose: print(cmd)
+        output = subprocess.check_output(cmd, shell=True).decode()
+        if token in output:
+            return
+
+# Wait for correct validation record to show up on all authoritative nameservers.
+def wait_challenge(zone, domain, token, verbose=False):
+    vdomain = challenge_record(domain, token)['name'] + '.'
+    for ns in zone['name_servers']:
+        wait_for_challenge_at(ns, vdomain, token, verbose)
+
+def test(domain_name):
+    print('Get zone info for:', domain_name)
+    zone = get_zone(domain_name)
+    print('Zone id: {}\nName servers: {}'.format(zone['id'], zone['name_servers']))
+    token = time.strftime('%Y%m%d %H:%M:%S')
+    print('Using token:', token)
+    print('Add record', challenge_record(domain_name, token))
+    add_challenge(zone, domain_name, token)
+    print('Add record ok')
+    try:
+        print('Wait for record')
+        with timeout(TIMEOUT):
+            wait_challenge(zone, domain_name, token, verbose=True)
+        print('Record is on all nameservers')
+    finally:
+        print('Delete record')
+        del_challenge(zone, domain_name, token)
+        print('Delete record ok')
+
+def main():
+    if sys.argv[1] == 'test':
+        test(sys.argv[2])
+    elif sys.argv[1] == 'challenge-dns-start':
+        domain = sys.argv[2]
+        token = sys.argv[4]
+        zone = get_zone(domain)
+        add_challenge(zone, domain, token)
+        try:
+            with timeout(TIMEOUT):
+                wait_challenge(zone, domain, token)
+        except:
+            del_challenge(zone, domain, token)
+            raise
+    elif sys.argv[1] == 'challenge-dns-stop':
+        domain = sys.argv[2]
+        token = sys.argv[4]
+        zone = get_zone(domain)
+        del_challenge(zone, domain, token)
+    else:
+        sys.exit(42)
+
+if __name__ == '__main__':
+    main()
