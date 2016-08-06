@@ -3,7 +3,7 @@ DNS verification hook for [acmetool](https://github.com/hlandau/acme) using clou
 ## Usage
 
 
-Download dns.hook to your server. Install dependencies: python 3, requests.
+Download `dns.hook` to your server. Install dependencies: python 3, requests. You also need the `dig` program. On debian based systems it is available in the `dnsutils` package.
 
 Allow only yourself to read/write/execute it:
 ```
@@ -18,7 +18,7 @@ $ ./dns.hook test [sub.yourdomain.tld]
 ```
 The script will try to create a TXT record `_acme-challenge.[sub.yourdomain.tld]`, verify it, and delete it.
 
-If it works, copy/move to acmetool hooks dir (e.g. /usr/lib/acme/hooks/):
+If it works, copy/move to acmetool hooks dir (e.g. `/usr/lib/acme/hooks/`):
 
 ```
 $ sudo mv dns.hook /usr/lib/acme/hooks/
